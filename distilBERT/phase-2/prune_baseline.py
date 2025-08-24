@@ -384,7 +384,7 @@ def evaluate_model(m: torch.nn.Module, tag: str):
         model=m,
         args=args,
         eval_dataset=encoded_dataset["validation"],
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
     )
@@ -410,7 +410,7 @@ def finetune_model(m: torch.nn.Module, step_idx: int):
         model=m,
         args=args,
         train_dataset=encoded_dataset["train"],
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
     )
     trainer.train()
