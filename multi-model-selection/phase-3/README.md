@@ -1,4 +1,4 @@
-# Phase 3: Model Quantization ⚖️
+# Phase 3: Model Quantization
 
 This phase applies 8-bit weight-only quantization to reduce model size and accelerate inference speed. It contains two scripts to quantize both the original baseline model and the pruned model from Phase 2.
 

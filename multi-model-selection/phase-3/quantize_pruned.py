@@ -50,7 +50,7 @@ def evaluate_model(model, tag="model"):
         model=model,
         args=args,
         eval_dataset=encoded_dataset["validation"],
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
     )
@@ -121,48 +121,16 @@ def load_pruned_model():
     Try multiple methods to load the pruned model
     """
     print("Attempting to load pruned model...")
+
+    sd = torch.load(PRUNED_MODEL_PATH, map_location="cpu")
     
-    # Method 2: Create matching architecture and load state dict
-    if os.path.exists(PRUNED_MODEL_PATH):
-        try:
-            # Load state dict to inspect dimensions
-            sd = torch.load(PRUNED_MODEL_PATH, map_location="cpu")
-            
-            # Create model with matching architecture
-            model = create_pruned_model_architecture(sd)
-            
-            # Now load the state dict (should work perfectly)
-            missing_keys, unexpected_keys = model.load_state_dict(sd, strict=False)
-            
-            if not missing_keys and not unexpected_keys:
-                print("✓ Perfect match! Loaded pruned model with correct architecture")
-                return model
-            else:
-                print(f"⚠ Partial load: missing={len(missing_keys)}, unexpected={len(unexpected_keys)}")
-                if len(missing_keys) < 10:  # If only a few keys are missing, proceed
-                    print("✓ Proceeding with mostly-matched pruned model")
-                    return model
-                
-        except Exception as e:
-            print(f"⚠ Failed to create matching architecture: {e}")
+    model = create_pruned_model_architecture(sd)
     
-    # Method 3: Try loading with strict=False (original approach)
-    if os.path.exists(PRUNED_MODEL_PATH):
-        try:
-            model = DistilBertForSequenceClassification.from_pretrained(BASELINE_DIR)
-            sd = torch.load(PRUNED_MODEL_PATH, map_location="cpu")
-            
-            # This will fail but we can still try
-            missing_keys, unexpected_keys = model.load_state_dict(sd, strict=False)
-            print(f"⚠ Dimension mismatch: missing={len(missing_keys)}, unexpected={len(unexpected_keys)}")
-            print("⚠ Falling back to baseline due to architecture mismatch")
-                
-        except Exception as e:
-            print(f"⚠ Failed to load pruned state dict: {e}")
+    missing_keys, unexpected_keys = model.load_state_dict(sd, strict=False)
+    if not missing_keys and not unexpected_keys:
+        print("✓ Perfect match! Loaded pruned model with correct architecture")
     
-    # Method 4: Fallback to baseline
-    print("Using baseline model")
-    return DistilBertForSequenceClassification.from_pretrained(BASELINE_DIR)
+    return model    
 
 # --- Main ---
 def main():
@@ -170,7 +138,7 @@ def main():
     print("torchao Quantization - Weight Only Int8")
     print("="*50)
 
-    # Load model (baseline or pruned)
+    # Load model
     model = load_pruned_model()
     
     # Evaluate original model

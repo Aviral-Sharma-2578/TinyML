@@ -49,7 +49,7 @@ def evaluate_model(model, tag="model"):
         model=model,
         args=args,
         eval_dataset=encoded_dataset["validation"],
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
     )

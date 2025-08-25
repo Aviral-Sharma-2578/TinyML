@@ -1,4 +1,4 @@
-# Phase 1: Baseline Model Training 🎯
+# Phase 1: Baseline Model Training
 
 This script establishes the performance benchmark for the entire project. It fine-tunes a standard `distilbert-base-uncased` model on the GLUE SST-2 dataset and records its key performance metrics.
 
@@ -12,7 +12,7 @@ The goal of `baselines.py` is to create a foundational model against which all s
 
 ### ## How to Run
 
-Ensure you have the required dependencies installed and then run the script from the root directory of the project:
+Ensure all the required dependencies are installed and then run the script from the root directory of the project:
 
 ```bash
 python phase-1/baselines.py
