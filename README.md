@@ -3,6 +3,7 @@
 Exploring **model optimization for efficient inference** on resource-constrained devices (Edge / IoT ML).  
 
 The goal is to **compress transformer-based models (LLMs, BERT-like)** using a combination of **pruning, quantization, and knowledge distillation**, while incorporating **energy-aware optimization** so that inference is feasible on microcontrollers and edge devices.  
+
 ![Visualization](distilBERT/phase-4/compression_dashboard.png)
 ---
 
