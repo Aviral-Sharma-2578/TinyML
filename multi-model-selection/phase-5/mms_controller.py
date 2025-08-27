@@ -207,34 +207,33 @@ class EnergyAwareModelSelector:
 # --- Example Usage ---
 if __name__ == "__main__":
     
-    controller = EnergyAwareModelSelector(max_energy_capacity=50.0, initial_energy=12.0)
+    # Start with a high initial energy to test the top model
+    controller = EnergyAwareModelSelector(max_energy_capacity=50.0, initial_energy=16.0)
     
     sentence = "This movie is a masterpiece, a true work of art."
     
-    # Simulate a sequence of inference requests with varying energy harvesting
+    # A new simulation designed to trigger each model
     simulation_steps = [
-        {"harvested": 10.0, "task": "Positive sentence"},
-        {"harvested": 3.0,  "task": "Low energy harvest"},
-        {"harvested": 25.0, "task": "High energy harvest"},
-        {"harvested": 2.0,  "task": "Another low harvest"},
-        {"harvested": 2.0,  "task": "Barely enough energy"},
-        {"harvested": 40.0, "task": "Full recharge"},
+        {"harvested": 0.0,  "task": "High initial energy"},  # Energy: 16 -> Chooses baseline (cost 15), remaining: 1
+        {"harvested": 10.0, "task": "Medium energy"},         # Energy: 1+10=11 -> Chooses q_baseline (cost 10), remaining: 1
+        {"harvested": 8.0,  "task": "Low-medium energy"},     # Energy: 1+8=9 -> Chooses pruned (cost 8), remaining: 1
+        {"harvested": 5.0,  "task": "Low energy"},            # Energy: 1+5=6 -> Chooses pruned_quantized (cost 5), remaining: 1
+        {"harvested": 2.0,  "task": "Insufficient energy"},   # Energy: 1+2=3 -> Chooses None
     ]
     
     print("\n" + "="*80)
-    print("🚀 Starting Energy-Aware Inference Simulation")
+    print("🚀 Starting Energy-Aware Inference Simulation (Revised)")
     print("="*80)
 
     for i, step in enumerate(simulation_steps):
         print(f"\n--- Step {i+1}: {step['task']} ---")
-        print(f"   ⚡️ Energy harvested: {step['harvested']:.1f} units")
+        print(f"    ⚡️ Energy harvested: {step['harvested']:.1f} units")
         
         result = controller.select_and_infer(sentence, harvested_energy=step['harvested'])
         
-        print(f"   🔋 Energy State: {result['energy_before']:.1f} -> {result['energy_after']:.1f} (Cost: {result['energy_cost']:.1f})")
-        print(f"   🤖 Model Used:   {result['model_used']} ({result['status']})")
+        print(f"    🔋 Energy State: {result['energy_before']:.1f} -> {result['energy_after']:.1f} (Cost: {result['energy_cost']:.1f})")
+        print(f"    🤖 Model Used:   {result['model_used']} ({result['status']})")
 
         if result['status'] == 'Success':
-            print(f"   📝 Prediction:   {result['prediction']} (Score: {result['score']:.4f})")
-            print(f"   ⏱️ Latency:      {result['latency_sec']*1000:.2f} ms")
-
+            print(f"    📝 Prediction:   {result['prediction']} (Score: {result['score']:.4f})")
+            print(f"    ⏱️ Latency:      {result['latency_sec']*1000:.2f} ms")
