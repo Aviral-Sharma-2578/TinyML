@@ -47,3 +47,5 @@ This repository contains prototypes for each of the strategies discussed:
 ## Results & Trade-offs 
 
 Model compression techniques like pruning and quantization create a spectrum of models with different performance characteristics. The goal of this project's dynamic selectors is to intelligently navigate these trade-offs in real-time.
+
+![Simulation Dashboard](MoE_simulation.png)
