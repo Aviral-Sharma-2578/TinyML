@@ -1,84 +1,49 @@
-# Energy-Aware Dynamic Model Selector
+# Adaptive Intra-Inference Execution for Efficient NLP
 
-## Overview
+This repository contains a prototype exploring various strategies for **dynamic, energy-aware neural inference**. The core idea is to move beyond using a single, static model and instead adapt the computational path in real-time to balance the trade-off between **accuracy** and **resource consumption** (e.g., energy, latency).
 
-This Python script provides a practical implementation of the **Energy-Aware Dynamic Neural Inference** concept, inspired by the research paper "Energy-Aware Dynamic Neural Inference" (arXiv:2411.02471).
+This is particularly relevant for deploying complex models like transformers on resource-constrained edge devices.
 
-The core idea is to simulate an intelligent system, like a small IoT device with a solar panel, that must perform machine learning tasks. The device has a limited-capacity battery and a variable energy supply. Instead of using a single ML model, it has access to several versions of the same model, each with a different trade-off between **accuracy** and **energy cost**:
+## The Core Concept: A Spectrum of Switching Granularity
 
-* **Baseline:** Highest accuracy, highest energy cost.
-* **Pruned:** Slightly lower accuracy, medium energy cost.
-* **Quantized:** Good accuracy, low energy cost.
-* **Pruned + Quantized:** Lowest accuracy, lowest energy cost.
-
-The script implements a **Multi-Model Selection (MMS)** strategy. Before each task, the system checks its battery level and dynamically chooses the best (most accurate) model it can afford to run. This allows it to maximize performance when energy is abundant and gracefully degrade to a more efficient model when energy is scarce, ensuring continuous operation.
+The project investigates dynamic inference strategies across three distinct levels of granularity, from making one decision before inference to making continuous decisions during inference.
 
 ---
+## Implemented Strategies
 
-## How It Works
+### 1. Coarse-Grained (Inter-Model Selection)
+This approach treats each model as an atomic unit. A high-level controller selects one entire model from a pool to perform the full inference task.
 
-The main logic is encapsulated within the `EnergyAwareModelSelector` class.
+* **Mechanism**: A "gating network" makes a decision *prior* to inference based on the current system state.
+* **Policies Implemented**:
+    * **Energy-Aware**: Selects the most accurate model that the current energy budget can afford.
+    * **Complexity-Aware**: Uses fuzzy logic rules to select a model based on the input's estimated complexity (e.g., LOW, MEDIUM, HIGH).
 
-### 1. Initialization (`__init__`)
+### 2. Medium-Grained (Early-Exit Architecture)
+This strategy uses a single, unified network with multiple opportunities to exit during inference, saving computation on "easy" inputs.
 
-When an instance of the class is created, it sets up the entire environment:
+* **Mechanism**: A single backbone model is augmented with lightweight classifier heads at intermediate layers (`BranchyNet`). If a prediction's **confidence threshold** is met at an early exit, the result is returned immediately, skipping the deeper layers.
 
-* **Models:** It prepares to load the four different model variations into memory.
-* **Energy Simulation:** It initializes a virtual battery with a `max_energy_capacity` and a starting `current_energy` level.
-* **Energy Costs:** It defines a dictionary (`model_energy_costs`) that assigns a specific energy cost to an inference run for each model type. These are illustrative values.
-* **Model Preference:** It establishes a clear hierarchy (`model_preference`) from the most desirable model (`baseline`) to the most efficient (`pruned_quantized`). The system will always try to use the highest-ranking model in this list that it can afford.
+### 3. Fine-Grained (Intra-Inference Adaptation)
+This offers the highest level of control by adapting the computational strategy *during* a single forward pass. This allows the system to react to resource changes in real-time.
 
-```python
-# From the __init__ method
-self.model_energy_costs = {
-    'baseline': 15.0,
-    'quantized_baseline': 10.0,
-    'pruned': 8.0,
-    'pruned_quantized': 5.0,
-}
-self.model_preference = ['baseline', 'quantized_baseline', 'pruned', 'pruned_quantized']
-```
-
-### 2. The Inference Cycle (`select_and_infer`)
-
-This is the heart of the script. When a new task (e.g., classifying a sentence) arrives, it executes a three-step process:
-
-#### **Step 1: Harvest Energy**
-
-The system first updates its battery level by adding any `harvested_energy` from its environment. The battery level cannot exceed its maximum capacity.
-
-```python
-self.current_energy = min(self.current_energy + harvested_energy, self.max_energy_capacity)
-```
-
-#### **Step 2: Select the Best Affordable Model**
-
-This is the key decision-making step. The code iterates through the `model_preference` list. For each model, it checks if the `current_energy` is greater than or equal to the model's `energy_cost`. The **first** model that meets this condition is selected, and the search stops.
-
-```python
-model_choice = None
-for model_name in self.model_preference:
-    if model_name in self.models and self.current_energy >= self.model_energy_costs[model_name]:
-        model_choice = model_name
-        break # Found the best affordable model
-```
-
-If the battery doesn't have enough energy for even the cheapest model (`pruned_quantized`), `model_choice` remains `None`, and the inference task is **skipped** for that cycle to conserve energy.
-
-#### **Step 3: Perform Inference and Consume Energy ⚡**
-
-If a model was selected:
-
-1.  The corresponding model is retrieved.
-2.  The inference is performed, and the time taken (`latency`) is measured.
-3.  The model's `energy_cost` is subtracted from the `current_energy`.
-4.  The results, including the prediction, the model used, and the updated energy state, are returned.
+* **Conceptual Models Explored**:
+    * **Segment-level Switching**: The model is partitioned into segments (e.g., blocks of layers). A policy controller selects a pre-stored precision variant (e.g., INT4, INT8) for the *next segment* based on the real-time energy budget.
+    * **Resource-Driven MoE Routing**: The Mixture-of-Experts gating concept is adapted to be resource-driven, selecting an "expert" variant to execute the next computational step.
+    * **Progressive Refinement**: A full, low-cost inference pass is performed first. If confidence is low and resources permit, critical parts of the network are re-executed with a higher-fidelity model.
 
 ---
+## File Descriptions 
 
-## How to Run the Simulation
+This repository contains prototypes for each of the strategies discussed:
 
-The `if __name__ == "__main__":` block at the end of the file runs a demonstration.
+* `mms_controller.py`: Implements the **coarse-grained** greedy, energy-based Multi-Model Selection (MMS) strategy.
+* `MoE.py`: Reframes the MMS controller using Mixture-of-Experts (MoE) terminology, where the models are "experts" and the selection logic is a "gating network".
+* `fuzzy_mms_controller.py`: A **coarse-grained** controller that uses fuzzy logic based on task complexity instead of energy.
+* `early_exit.py`: A **medium-grained** implementation of a BranchyNet with a confidence-based early-exit policy, demonstrated on the MNIST dataset.
+* `intra_switch.py`: A research prototype for **fine-grained**, layer-wise precision switching in a DistilBERT model.
 
-1.  **Controller:** An instance of the `EnergyAwareModelSelector` is created with a 50-unit battery capacity and 12 units of initial energy.
-2.  **Simulation Loop:** The script simulates a series of events. In each step, a different amount of energy is "harvested." The `select_and_infer` method is called, and the script prints out which model was chosen based on the available energy.
+---
+## Results & Trade-offs 
+
+Model compression techniques like pruning and quantization create a spectrum of models with different performance characteristics. The goal of this project's dynamic selectors is to intelligently navigate these trade-offs in real-time.
