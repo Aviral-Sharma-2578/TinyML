@@ -16,7 +16,7 @@ QUANTIZED_BASELINE_PATH = os.path.join(BASE_OUTPUT_DIR, "phase-3", "quantized_ba
 QUANTIZED_PRUNED_PATH = os.path.join(BASE_OUTPUT_DIR, "phase-3", "quantized_weight_only_int8.pt")
 
 
-# --- Helper Functions (from your original file) ---
+# --- Helper Functions ---
 
 def load_state_dict_safely(model_path, device):
     """Loads a state dictionary, handling potential errors."""

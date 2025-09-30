@@ -65,7 +65,7 @@ def train_gating_network(moe_system, training_data, epochs=5, lr=1e-4):
         total_loss = 0
         
         # We process one by one since tokenization padding can be complex in a simple example
-        # In a real scenario, you'd use a custom collate_fn for batching.
+        # In a real scenario, we'd use a custom collate_fn for batching.
         for i in tqdm(range(len(texts)), desc=f"Epoch {epoch+1}/{epochs}"):
             text = texts[i]
             target_expert = target_indices[i].unsqueeze(0).to(moe_system.device) # Shape [1]
@@ -103,7 +103,7 @@ if __name__ == "__main__":
     moe_system = TrainableEnergyAwareMoE(max_energy_capacity=50.0, initial_energy=16.0)
 
     # 2. Create a dummy labeled dataset for generating gate training data
-    # In a real scenario, this would be your validation or training set from a file.
+    # In a real scenario, this would be our validation or training set from a file.
     # Labels: 0 for NEGATIVE, 1 for POSITIVE
     dummy_sentiment_dataset = [
         ("This movie is a masterpiece, a true work of art.", 1),
