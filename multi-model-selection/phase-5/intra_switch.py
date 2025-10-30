@@ -180,6 +180,7 @@ class LayerwiseSwitcher:
             layer_choices = []
             layer_times = []
 
+            attention_mask = attention_mask.to(torch.bool)
             # iterate transformer layers and select variant
             for idx, variants in enumerate(self.layer_variants):
                 choice = policy.choose_precision(idx)
@@ -192,10 +193,10 @@ class LayerwiseSwitcher:
                 # `outputs = chosen_layer(hidden_state, attn_mask=attention_mask)` — if errors occur,
                 # inspect the layer's forward signature and adapt accordingly.
                 try:
-                    hidden_state = chosen_layer(hidden_state, attention_mask=attention_mask)[0]
+                    hidden_state = chosen_layer(hidden_state, attn_mask=attention_mask)[0]
                 except TypeError:
                     # fallback: some versions return plain tensor
-                    out = chosen_layer(hidden_state, attention_mask=attention_mask)
+                    out = chosen_layer(hidden_state, attn_mask=attention_mask)
                     if isinstance(out, tuple) or isinstance(out, list):
                         hidden_state = out[0]
                     else:

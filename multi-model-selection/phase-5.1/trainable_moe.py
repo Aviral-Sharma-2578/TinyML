@@ -1,6 +1,7 @@
 # file: trainable_moe.py
 
 import os
+import copy
 import time
 import torch
 import torch.nn as nn
@@ -117,55 +118,56 @@ class TrainableEnergyAwareMoE:
             self.text_embedder = None
 
     def _load_experts(self):
-        """Loads all expert models into memory."""
-        print("\n1. Loading shared tokenizer...")
-        if not os.path.isdir(BASELINE_DIR):
-            print(f"   ❌ CRITICAL: Baseline directory not found at {BASELINE_DIR}. Cannot load models.")
-            return
-        self.tokenizer = DistilBertTokenizerFast.from_pretrained(BASELINE_DIR)
+        """
+        Loads all expert models into memory.
         
-        print("\n2. Loading Expert: 'baseline'...")
+        FOR DEMONSTRATION: This function will now create distinct copies of a base
+        model and slightly alter their weights to simulate performance differences
+        between experts. This is crucial for generating meaningful training data for the gate.
+        """
+        print("\n1. Loading and creating distinct expert models for demonstration...")
+        
+        if not os.path.isdir(BASELINE_DIR):
+            print("   Baseline directory not found. Using 'distilbert-base-uncased' for all experts.")
+            base_model_name = 'distilbert-base-uncased'
+            self.tokenizer = DistilBertTokenizerFast.from_pretrained(base_model_name)
+        else:
+            base_model_name = BASELINE_DIR
+            self.tokenizer = DistilBertTokenizerFast.from_pretrained(base_model_name)
+
+        # --- Load the 'baseline' expert ---
+        print("   - Loading 'baseline' expert...")
         try:
-            self.experts['baseline'] = DistilBertForSequenceClassification.from_pretrained(BASELINE_DIR).to(self.device)
+            baseline_model = DistilBertForSequenceClassification.from_pretrained(base_model_name).to(self.device)
+            self.experts['baseline'] = baseline_model
         except Exception as e:
             print(f"   ⚠️ Could not load baseline expert: {e}")
+            return # Cannot proceed without a baseline model
 
-        print("\n3. Loading Expert: 'pruned'...")
-        try:
-            pruned_sd = load_state_dict_safely(PRUNED_MODEL_PATH, self.device)
-            pruned_expert_base = create_pruned_model_architecture(pruned_sd)
-            pruned_expert_base.load_state_dict(pruned_sd)
-            self.experts['pruned'] = pruned_expert_base.to(self.device)
-        except Exception as e:
-            print(f"   ⚠️ Could not load pruned expert: {e}")
+        # --- Create simulated experts with performance differences ---
+        # We will deepcopy the baseline and add noise to simulate pruning/quantization
+        experts_to_simulate = {
+            'quantized_baseline': 0.005, # amount of noise to add
+            'pruned': 0.01,
+            'pruned_quantized': 0.02
+        }
 
-        print("\n4. Loading Expert: 'quantized_baseline'...")
-        try:
-            model_to_quantize = DistilBertForSequenceClassification.from_pretrained(BASELINE_DIR)
-            quantize_(model_to_quantize, Int8WeightOnlyConfig())
-            quantized_sd = load_state_dict_safely(QUANTIZED_BASELINE_PATH, self.device)
-            model_to_quantize.load_state_dict(quantized_sd)
-            self.experts['quantized_baseline'] = model_to_quantize.to(self.device)
-        except Exception as e:
-            print(f"   ⚠️ Could not load quantized baseline expert: {e}")
+        for name, noise_level in experts_to_simulate.items():
+            print(f"   - Simulating '{name}' expert...")
+            # 1. Create a true, independent copy of the model
+            simulated_model = copy.deepcopy(baseline_model)
             
-        print("\n5. Loading Expert: 'pruned_quantized'...")
-        try:
-            if 'pruned' in self.experts:
-                pruned_sd_cpu = load_state_dict_safely(PRUNED_MODEL_PATH, 'cpu')
-                pruned_model_to_quantize = create_pruned_model_architecture(pruned_sd_cpu)
-                quantize_(pruned_model_to_quantize, Int8WeightOnlyConfig())
-                quantized_pruned_sd = load_state_dict_safely(QUANTIZED_PRUNED_PATH, self.device)
-                pruned_model_to_quantize.load_state_dict(quantized_pruned_sd)
-                self.experts['pruned_quantized'] = pruned_model_to_quantize.to(self.device)
-            else:
-                print("   ⚠️ Skipping because pruned expert failed to load.")
-        except Exception as e:
-            print(f"   ⚠️ Could not load pruned + quantized expert: {e}")
+            # 2. Add random noise to its weights to simulate performance degradation
+            with torch.no_grad():
+                for param in simulated_model.parameters():
+                    param.add_(torch.randn(param.size()).to(self.device) * noise_level)
+            
+            self.experts[name] = simulated_model
 
         for expert in self.experts.values():
             expert.eval()
-        print(f"\n✅ {len(self.experts)} experts loaded successfully.")
+            
+        print(f"\n✅ {len(self.experts)} distinct expert models are ready.")
 
     def _get_text_embedding(self, inputs: dict) -> torch.Tensor:
         """Extracts the [CLS] token embedding for the input text."""

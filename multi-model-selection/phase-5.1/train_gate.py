@@ -1,8 +1,10 @@
 # file: train_gate.py
 
+import copy
 import torch
 import torch.optim as optim
 import torch.nn as nn
+import torch.nn.functional as F 
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 import random
@@ -10,12 +12,12 @@ import random
 # Import the MoE system which contains the models and tokenizer
 from trainable_moe import TrainableEnergyAwareMoE
 
-def generate_gate_training_data(moe_system, dataset):
+def generate_gate_training_data(moe_system, dataset, confidence_threshold=0.90, baseline_premium_threshold=0.98):
     """
-    Generates pseudo-labels for training the gating network.
-    For each data point, it finds the cheapest expert that gets the correct answer.
+    Generates pseudo-labels, now with a special rule to prefer the baseline
+    expert when it is exceptionally confident.
     """
-    print("\n🔬 Generating pseudo-labels for the gating network...")
+    print(f"\n🔬 Generating pseudo-labels with confidence_threshold={confidence_threshold} and baseline_premium_threshold={baseline_premium_threshold}...")
     training_data = []
     
     expert_names_sorted_by_cost = sorted(
@@ -26,25 +28,38 @@ def generate_gate_training_data(moe_system, dataset):
     for text, true_label_idx in tqdm(dataset, desc="Processing dataset"):
         inputs = moe_system.tokenizer(text, return_tensors="pt").to(moe_system.device)
         
-        optimal_expert_idx = -1
-
-        # Find the cheapest expert that is correct
+        # Find all experts that are confidently correct
+        confidently_correct_experts = []
         for expert_name in expert_names_sorted_by_cost:
             expert_model = moe_system.experts[expert_name]
             with torch.no_grad():
-                outputs = expert_model(**inputs)
-                prediction_idx = torch.argmax(outputs.logits, dim=1).item()
+                probabilities = F.softmax(expert_model(**inputs).logits, dim=1)
+                confidence_score = probabilities.max().item()
+                prediction_idx = probabilities.argmax().item()
             
-            if prediction_idx == true_label_idx:
-                # This is the cheapest correct expert, we've found our target
-                optimal_expert_idx = moe_system.expert_names.index(expert_name)
-                break # Move to the next data sample
+            if prediction_idx == true_label_idx and confidence_score >= confidence_threshold:
+                confidently_correct_experts.append({"name": expert_name, "confidence": confidence_score})
+
+        # --- NEW HEURISTIC TO CHOOSE THE OPTIMAL EXPERT ---
+        if not confidently_correct_experts:
+            print(f"\nInput: '{text[:30]}...' -> No expert was confidently correct. Skipping.")
+            continue
         
-        # If no expert got it right, we can either skip it or assign the best-performing one
-        # For simplicity, we'll only add data where at least one expert was correct.
-        if optimal_expert_idx != -1:
-            training_data.append((text, optimal_expert_idx))
-            
+        # Rule: If the baseline model is a valid choice and is extremely confident,
+        #       prefer it to teach the gate the value of high quality.
+        baseline_choice = next((exp for exp in confidently_correct_experts if exp['name'] == 'baseline'), None)
+        
+        if baseline_choice and baseline_choice['confidence'] > baseline_premium_threshold:
+            optimal_expert_name = 'baseline'
+        else:
+            # Otherwise, fall back to the cheapest valid expert (the first in the sorted list)
+            optimal_expert_name = confidently_correct_experts[0]['name']
+
+        optimal_expert_idx = moe_system.expert_names.index(optimal_expert_name)
+        confidence = next(exp['confidence'] for exp in confidently_correct_experts if exp['name'] == optimal_expert_name)
+        print(f"\nInput: '{text[:30]}...' -> Optimal Expert: {optimal_expert_name} (Confidence: {confidence:.2f})")
+        training_data.append((text, optimal_expert_idx))
+
     print(f"✅ Generated {len(training_data)} training samples for the gate.")
     return training_data
 
@@ -108,10 +123,18 @@ if __name__ == "__main__":
     dummy_sentiment_dataset = [
         ("This movie is a masterpiece, a true work of art.", 1),
         ("I was completely bored from start to finish.", 0),
-        ("A decent attempt, but it ultimately falls flat.", 0),
+
+        # Nuance/Sarcasm: Cheaper models might miss the negative sentiment
+        ("I can't believe I sat through the entire thing. Truly a cinematic experience of all time.", 0),
+        
+        # Complex Sentence: Requires understanding the connecting phrase "despite"
+        ("Despite a fantastic performance by the lead actor, the film's plot was convoluted and unsatisfying.", 0),
+        
+        # Faint Praise: Harder to classify as strictly positive or negative
+        ("It was an interesting film, certainly not one I would forget easily, though perhaps not for the right reasons.", 0),
+
+        # A clear positive case that all models should get
         ("Absolutely brilliant! I would recommend this to everyone.", 1),
-        ("It was just okay, nothing special.", 0),
-        ("A cinematic triumph of the highest order!", 1),
     ]
     
     # 3. Generate the training data for the gate
