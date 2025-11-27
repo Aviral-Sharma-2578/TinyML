@@ -181,7 +181,15 @@ class TrainableEnergyAwareMoE:
         """Performs a full MoE inference cycle using the trainable gate."""
         self.current_energy = min(self.current_energy + harvested_energy, self.max_energy_capacity)
         
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
+        # --- FIX: Add truncation=True and max_length=512 ---
+        inputs = self.tokenizer(
+            text, 
+            return_tensors="pt", 
+            truncation=True, 
+            max_length=512
+        ).to(self.device)
+        # ---------------------------------------------------
+
         text_embedding = self._get_text_embedding(inputs)
         energy_tensor = torch.tensor([[self.current_energy]], dtype=torch.float32, device=self.device)
         
