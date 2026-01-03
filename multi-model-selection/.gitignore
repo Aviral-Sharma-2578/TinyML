@@ -1,0 +1,76 @@
+# Exclude specific folders
+ICML/
+env/
+data/
+outputs/
+
+# Exclude root-level files (not in phase folders)
+# Model checkpoints and trained weights
+/*.pt
+/*.pth
+trained_*.pt
+gate_trained.pt
+
+# Visualization and analysis files at root
+/*.png
+/*.pdf
+energy_dynamics_analysis.*
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# Keep phase folders and their contents
+!phase-*/
+!phase-*/*
+

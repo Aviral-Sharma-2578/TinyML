@@ -190,51 +190,88 @@ if len(all_results) > 0:
     latencies = [r["latency_sec"] for r in all_results]
     memories = [r["memory_mb"] for r in all_results]
 
-    plt.style.use("seaborn-v0_8-muted")
+    # --- IEEE Publication Quality Configuration ---
+    plt.style.use("seaborn-v0_8-paper") # 'paper' style sets smaller defaults suitable for docs
+
+    params = {
+        # Figure size: 3.5 inches wide (single column)
+        'figure.figsize': (3.5, 2.625), # 4:3 aspect ratio often works well
+        'axes.labelsize': 9,            # Label size (approx 8-10pt is standard)
+        'axes.titlesize': 9,            # Title size (if used)
+        'font.size': 9,                 # General font size
+        'legend.fontsize': 8,           # Legend size
+        'xtick.labelsize': 8,           # Tick labels
+        'ytick.labelsize': 8,           # Tick labels
+        'font.family': 'serif',         # IEEE uses serif fonts (Times New Roman) usually
+        'font.serif': ['Times New Roman', 'Times', 'DejaVu Serif'],
+        'lines.linewidth': 1.5,
+        'lines.markersize': 5,
+        'axes.grid': True,              # Turn grid on globally
+        'grid.alpha': 0.3,              # Light grid
+        'grid.linestyle': '--'
+    }
+    plt.rcParams.update(params)
+
+    # --- Plotting ---
 
     # 1️⃣ Accuracy vs Pruning %
-    plt.figure(figsize=(7, 5))
-    plt.plot(amounts, accs, marker="o", color="dodgerblue")
-    plt.title("Accuracy vs. Pruning Amount")
+    plt.figure()
+    plt.plot(amounts, accs, marker="o", color="dodgerblue", clip_on=False)
     plt.xlabel("Pruning per step (%)")
     plt.ylabel("Final Accuracy")
-    plt.grid(True, linestyle="--", alpha=0.6)
-    plt.tight_layout()
+    # Note: Title removed (put in LaTeX caption)
+    plt.tight_layout(pad=0.5)
+    # plt.savefig("fig_accuracy.pdf") # Save as PDF for best quality in LaTeX
     plt.show()
 
     # 2️⃣ Compression Ratio vs Pruning %
-    plt.figure(figsize=(7, 5))
-    plt.plot(amounts, compressions, marker="s", color="orange")
-    plt.title("Compression Ratio vs. Pruning Amount")
+    plt.figure()
+    plt.plot(amounts, compressions, marker="s", color="orange", clip_on=False)
     plt.xlabel("Pruning per step (%)")
     plt.ylabel("Compression Ratio (×)")
-    plt.grid(True, linestyle="--", alpha=0.6)
-    plt.tight_layout()
+    plt.tight_layout(pad=0.5)
     plt.show()
 
     # 3️⃣ Accuracy–Compression Trade-off
-    plt.figure(figsize=(7, 5))
-    plt.plot(compressions, accs, marker="D", color="purple")
+    plt.figure()
+    plt.plot(compressions, accs, marker="D", color="purple", clip_on=False)
+
+    # Optimize annotations for small space
     for r in all_results:
-        plt.text(r["compression_ratio"], r["accuracy"] - 0.002, f"{r['amount']*100:.0f}%", fontsize=9)
-    plt.title("Accuracy vs. Compression Trade-off")
+        # Adding a slight offset to text so it doesn't overlap the marker
+        plt.annotate(
+            f"{r['amount']*100:.0f}%", 
+            (r["compression_ratio"], r["accuracy"]),
+            textcoords="offset points", 
+            xytext=(0, 5), 
+            ha='center', 
+            fontsize=7 # Smaller font for annotations
+        )
+
     plt.xlabel("Compression Ratio (×)")
     plt.ylabel("Accuracy")
-    plt.grid(True, linestyle="--", alpha=0.6)
-    plt.tight_layout()
+    plt.tight_layout(pad=0.5)
     plt.show()
 
     # 4️⃣ Latency and Memory vs Pruning %
-    fig, ax1 = plt.subplots(figsize=(7, 5))
+    # Using subplots() is cleaner for layout management
+    fig, ax1 = plt.subplots()
+
     ax2 = ax1.twinx()
-    ax1.plot(amounts, latencies, marker="o", color="steelblue", label="Latency (s)")
-    ax2.plot(amounts, memories, marker="^", color="crimson", label="Memory (MB)")
+    # Use 'markeredgecolor' to make points stand out in small plots
+    l1 = ax1.plot(amounts, latencies, marker="o", color="steelblue", label="Latency")
+    l2 = ax2.plot(amounts, memories, marker="^", color="crimson", label="Memory")
+
     ax1.set_xlabel("Pruning per step (%)")
     ax1.set_ylabel("Latency (s)", color="steelblue")
     ax2.set_ylabel("Memory (MB)", color="crimson")
-    plt.title("Latency and Memory vs. Pruning Amount")
-    ax1.grid(True, linestyle="--", alpha=0.6)
-    plt.tight_layout()
+
+    # Combine legends for dual-axis plot
+    lns = l1 + l2
+    labs = [l.get_label() for l in lns]
+    ax1.legend(lns, labs, loc='best') # 'best' usually finds the empty spot
+
+    plt.tight_layout(pad=0.5)
     plt.show()
 
     # Print summary table

@@ -1,9 +1,13 @@
 import os
 import time
 import torch
+import random
 import numpy as np
 from transformers import DistilBertTokenizerFast, DistilBertForSequenceClassification
 from torchao.quantization import quantize_, Int8WeightOnlyConfig
+from datasets import load_dataset
+from sklearn.metrics import accuracy_score
+from tqdm import tqdm
 
 # --- Configuration ---
 BASE_OUTPUT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "outputs"))
@@ -113,26 +117,23 @@ class EnergyAwareMoE:
 
         print("\n4. Loading Expert: 'quantized_baseline'...")
         try:
-            model_to_quantize = DistilBertForSequenceClassification.from_pretrained(BASELINE_DIR)
-            quantize_(model_to_quantize, Int8WeightOnlyConfig())
+            model_q_baseline = DistilBertForSequenceClassification.from_pretrained(BASELINE_DIR)
+            # Ensure architecture matches quantized checkpoint (weight-only int8)
+            quantize_(model_q_baseline, Int8WeightOnlyConfig())
             quantized_sd = load_state_dict_safely(QUANTIZED_BASELINE_PATH, self.device)
-            model_to_quantize.load_state_dict(quantized_sd)
-            self.experts['quantized_baseline'] = model_to_quantize.to(self.device)
+            model_q_baseline.load_state_dict(quantized_sd)
+            self.experts['quantized_baseline'] = model_q_baseline.to(self.device)
         except Exception as e:
             print(f"   ⚠️ Could not load quantized baseline expert: {e}")
             
         print("\n5. Loading Expert: 'pruned_quantized' (Low Latency, Low Cost)...")
         try:
-            if 'pruned' in self.experts:
-                # Re-create architecture on CPU first to avoid device mismatches during loading
-                pruned_sd_cpu = load_state_dict_safely(PRUNED_MODEL_PATH, 'cpu')
-                pruned_model_to_quantize = create_pruned_model_architecture(pruned_sd_cpu)
-                quantize_(pruned_model_to_quantize, Int8WeightOnlyConfig())
-                quantized_pruned_sd = load_state_dict_safely(QUANTIZED_PRUNED_PATH, self.device)
-                pruned_model_to_quantize.load_state_dict(quantized_pruned_sd)
-                self.experts['pruned_quantized'] = pruned_model_to_quantize.to(self.device)
-            else:
-                print("   ⚠️ Skipping because pruned expert failed to load.")
+            # Recreate the pruned architecture, apply same quantization config, then load weights
+            quantized_pruned_sd_cpu = load_state_dict_safely(QUANTIZED_PRUNED_PATH, 'cpu')
+            pruned_quantized_model = create_pruned_model_architecture(quantized_pruned_sd_cpu)
+            quantize_(pruned_quantized_model, Int8WeightOnlyConfig())
+            pruned_quantized_model.load_state_dict(quantized_pruned_sd_cpu)
+            self.experts['pruned_quantized'] = pruned_quantized_model.to(self.device)
         except Exception as e:
             print(f"   ⚠️ Could not load pruned + quantized expert: {e}")
 
@@ -184,7 +185,7 @@ class EnergyAwareMoE:
         energy_cost = self.expert_energy_costs[chosen_expert_name]
         energy_before_inference = self.current_energy
         
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
+        inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=512).to(self.device)
         
         with torch.no_grad():
             start_time = time.perf_counter()
@@ -209,62 +210,82 @@ class EnergyAwareMoE:
             "status": "Success"
         }
 
+def evaluate_system(moe_system, test_data):
+    """Evaluates the MoE system on test data with random energy levels."""
+    print(f"\n📊 Evaluating on {len(test_data)} test samples...")
+    print("   (Simulating random energy levels for each query to test adaptability)")
+    
+    predictions = []
+    true_labels = []
+    energy_costs = []
+    expert_usage = {name: 0 for name in moe_system.experts.keys()}
+    skipped = 0
+    
+    # Iterate through test data
+    for text, label in tqdm(test_data, desc="Testing"):
+        # 1. Simulate a random energy state for this user/moment
+        # This tests if the gate makes the right choice for *that* specific energy level
+        simulated_energy = random.uniform(0, moe_system.max_energy_capacity)
+        moe_system.current_energy = simulated_energy
+        
+        # 2. Run Inference
+        # We pass harvested_energy=0 because we manually set the "current" state above
+        result = moe_system.predict(text, harvested_energy=0.0)
+        
+        if result['status'] == 'Success':
+            # Map 'POSITIVE'/'NEGATIVE' back to 1/0
+            pred_label = 1 if result['prediction'] == 'POSITIVE' else 0
+            
+            predictions.append(pred_label)
+            true_labels.append(label)
+            energy_costs.append(result['energy_cost'])
+            expert_usage[result['expert_used']] += 1
+        else:
+            # If the gate (correctly or incorrectly) decided nothing was affordable
+            skipped += 1
+    
+    # --- Report Generation ---
+    if not predictions:
+        print("\n❌ All queries were skipped. Check if your simulated energy range matches expert costs.")
+        return
+
+    acc = accuracy_score(true_labels, predictions)
+    avg_energy = np.mean(energy_costs)
+    total_processed = len(predictions)
+    
+    print("\n" + "="*50)
+    print(f"🚀 FINAL EVALUATION REPORT")
+    print("="*50)
+    print(f"✅ Accuracy (on processed):   {acc:.4f} ({acc*100:.2f}%)")
+    print(f"⚡ Avg Energy Cost/Query:     {avg_energy:.2f} units")
+    print(f"⏭️  Skipped (Low Energy):      {skipped} ({skipped/len(test_data)*100:.1f}%)")
+    print("-" * 50)
+    print("🤖 Expert Selection Distribution:")
+    for name in moe_system.experts.keys():
+        count = expert_usage.get(name, 0)
+        percent = (count / total_processed * 100) if total_processed > 0 else 0
+        print(f"   - {name:<20}: {count:4d} ({percent:5.1f}%)")
+    print("="*50)
+
 # --- Example Usage ---
 if __name__ == "__main__":
+    # 1. Initialize System (Loads Experts)
+    # We set initial energy high, but the evaluator overrides it per sample anyway
+    moe_system = EnergyAwareMoE(max_energy_capacity=50.0, initial_energy=50.0)
     
-    # Create dummy files and dirs if they don't exist, to allow the script to run for demonstration
-    # In a real scenario, these trained models would already exist.
-    print("--- Setting up dummy model files for demonstration ---")
-    if not os.path.isdir(BASELINE_DIR):
-        print(f"Creating dummy directory: {BASELINE_DIR}")
-        os.makedirs(BASELINE_DIR)
-        # A minimal set of files for from_pretrained to work
-        with open(os.path.join(BASELINE_DIR, "config.json"), "w") as f:
-            f.write('{"model_type": "distilbert"}')
-        with open(os.path.join(BASELINE_DIR, "tokenizer_config.json"), "w") as f:
-            f.write('{"model_type": "distilbert"}')
-        # Create dummy state dicts as well, as they are expected by the loading logic
-        dummy_model = DistilBertForSequenceClassification.from_pretrained('distilbert-base-uncased')
-        torch.save(dummy_model.state_dict(), os.path.join(BASELINE_DIR, 'pytorch_model.bin'))
-        
-        os.makedirs(os.path.dirname(PRUNED_MODEL_PATH), exist_ok=True)
-        torch.save(dummy_model.state_dict(), PRUNED_MODEL_PATH)
+    # 2. Prepare Real Test Data
+    print("\n📚 Loading IMDb Test Data...")
+    try:
+        dataset = load_dataset("imdb")
+        # Take a random subset of 500 test samples
+        test_subset = dataset['test'].shuffle(seed=1337).select(range(500))
+        test_data = [(x['text'], x['label']) for x in test_subset]
+    except Exception as e:
+        print(f"⚠️ Could not load IMDb ({e}). Using dummy data.")
+        test_data = [
+            ("This movie was fantastic and thrilling.", 1), 
+            ("Terrible plot and bad acting.", 0)
+        ] * 50
 
-        os.makedirs(os.path.dirname(QUANTIZED_BASELINE_PATH), exist_ok=True)
-        torch.save(dummy_model.state_dict(), QUANTIZED_BASELINE_PATH)
-        
-        os.makedirs(os.path.dirname(QUANTIZED_PRUNED_PATH), exist_ok=True)
-        torch.save(dummy_model.state_dict(), QUANTIZED_PRUNED_PATH)
-    print("----------------------------------------------------\n")
-
-
-    # Start with a high initial energy to test the top model
-    moe_system = EnergyAwareMoE(max_energy_capacity=50.0, initial_energy=16.0)
-    
-    sentence = "This movie is a masterpiece, a true work of art."
-    
-    # A simulation designed to trigger each expert based on energy levels
-    simulation_steps = [
-        {"harvested": 0.0,  "task": "High initial energy"},  # Energy: 16 -> Gate routes to 'baseline' (cost 15), rem: 1
-        {"harvested": 10.0, "task": "Medium energy"},         # Energy: 1+10=11 -> Gate routes to 'q_baseline' (cost 10), rem: 1
-        {"harvested": 8.0,  "task": "Low-medium energy"},     # Energy: 1+8=9 -> Gate routes to 'pruned' (cost 8), rem: 1
-        {"harvested": 5.0,  "task": "Low energy"},            # Energy: 1+5=6 -> Gate routes to 'pruned_quantized' (cost 5), rem: 1
-        {"harvested": 2.0,  "task": "Insufficient energy"},   # Energy: 1+2=3 -> Gate returns 'None'
-    ]
-    
-    print("\n" + "="*80)
-    print("🚀 Starting Energy-Aware MoE Inference Simulation")
-    print("="*80)
-
-    for i, step in enumerate(simulation_steps):
-        print(f"\n--- Step {i+1}: {step['task']} ---")
-        print(f"    ⚡️ Energy harvested: {step['harvested']:.1f} units")
-        
-        result = moe_system.predict(sentence, harvested_energy=step['harvested'])
-        
-        print(f"    🔋 Energy State: {result['energy_before']:.1f} -> {result['energy_after']:.1f} (Cost: {result['energy_cost']:.1f})")
-        print(f"    🤖 Expert Used:  {result['expert_used']} ({result['status']})")
-
-        if result['status'] == 'Success':
-            print(f"    📝 Prediction:   {result['prediction']} (Score: {result['score']:.4f})")
-            print(f"    ⏱️ Latency:      {result['latency_sec']*1000:.2f} ms")
+    # 3. Run Assessment
+    evaluate_system(moe_system, test_data)

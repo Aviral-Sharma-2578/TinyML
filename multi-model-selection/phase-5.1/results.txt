@@ -1,0 +1,62 @@
+(env) spyro@spyro-Aspire-A715-42G:~/model-compression/TinyML/multi-model-selection$ python3 phase-5/MoE.py 
+🚀 Initializing Energy-Aware Mixture of Experts (MoE)...
+   - Device:           cuda
+   - Battery Capacity: 50.0 units
+   - Initial Energy:   50.0 units
+
+1. Loading shared tokenizer...
+
+2. Loading Expert: 'baseline' (High Accuracy, High Cost)...
+
+3. Loading Expert: 'pruned'...
+
+4. Loading Expert: 'quantized_baseline'...
+
+5. Loading Expert: 'pruned_quantized' (Low Latency, Low Cost)...
+
+✅ 4 experts loaded successfully.
+
+📚 Loading IMDb Test Data...
+
+📊 Evaluating on 500 test samples...
+   (Simulating random energy levels for each query to test adaptability)
+Testing: 100%|██████████████████████████████████████████████████████████████| 500/500 [00:08<00:00, 57.96it/s]
+
+==================================================
+🚀 FINAL EVALUATION REPORT
+==================================================
+✅ Accuracy (on processed):   0.8703 (87.03%)
+⚡ Avg Energy Cost/Query:     13.53 units
+⏭️  Skipped (Low Energy):      45 (9.0%)
+--------------------------------------------------
+🤖 Expert Selection Distribution:
+   - baseline            :  355 ( 78.0%)
+   - pruned              :   20 (  4.4%)
+   - quantized_baseline  :   54 ( 11.9%)
+   - pruned_quantized    :   26 (  5.7%)
+==================================================
+(env) spyro@spyro-Aspire-A715-42G:~/model-compression/TinyML/multi-model-selection$ python3 phase-5.1/evaluate_gate.py 
+🚀 Initializing MoE on cuda...
+   - Loading experts from saved checkpoints...
+📥 Loading trained gate weights from gate_trained.pt...
+✅ Gate loaded and set to Eval mode.
+
+📚 Loading IMDb Test Data...
+
+📊 Evaluating on 500 test samples...
+   (Simulating random energy levels for each query to test adaptability)
+Testing: 100%|██████████████████████████████████████████████████████████████| 500/500 [00:09<00:00, 53.19it/s]
+
+==================================================
+🚀 FINAL EVALUATION REPORT
+==================================================
+✅ Accuracy (on processed):   0.8778 (87.78%)
+⚡ Avg Energy Cost/Query:     9.51 units
+⏭️  Skipped (Low Energy):      58 (11.6%)
+--------------------------------------------------
+🤖 Expert Selection Distribution:
+   - baseline            :    0 (  0.0%)
+   - quantized_baseline  :  396 ( 89.6%)
+   - pruned              :    5 (  1.1%)
+   - pruned_quantized    :   41 (  9.3%)
+==================================================

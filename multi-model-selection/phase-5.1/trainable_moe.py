@@ -9,46 +9,31 @@ from transformers import DistilBertTokenizerFast, DistilBertForSequenceClassific
 from torchao.quantization import quantize_, Int8WeightOnlyConfig
 
 # --- Configuration ---
-# Creates an 'outputs' directory in the parent folder of where the script is located
-BASE_OUTPUT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "outputs"))
-BASELINE_DIR = os.path.join(BASE_OUTPUT_DIR, "phase-1", "baseline_model")
-PRUNED_MODEL_PATH = os.path.join(BASE_OUTPUT_DIR, "phase-2", "pruned_true_reduction.pt")
-QUANTIZED_BASELINE_PATH = os.path.join(BASE_OUTPUT_DIR, "phase-3", "quantized_baseline_weight_only_int8.pt")
-QUANTIZED_PRUNED_PATH = os.path.join(BASE_OUTPUT_DIR, "phase-3", "quantized_weight_only_int8.pt")
+BASELINE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "outputs", "phase-1", "baseline_model"))
+PRUNED_MODEL_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "outputs", "phase-2", "pruned_true_reduction.pt"))
+QUANTIZED_BASELINE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "outputs", "phase-3", "quantized_baseline_weight_only_int8.pt"))
+QUANTIZED_PRUNED_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "outputs", "phase-3", "quantized_weight_only_int8.pt"))
 
-
-# --- Helper Functions ---
-
+# --- Helpers shared with phase-5/MoE ---
 def load_state_dict_safely(model_path, device):
-    """Loads a state dictionary, handling potential errors."""
     if not os.path.exists(model_path):
-        print(f"   ❌ State dictionary not found at {model_path}. Skipping.")
         raise FileNotFoundError(f"Model file not found: {model_path}")
-    try:
-        return torch.load(model_path, map_location=device)
-    except Exception as e:
-        print(f"   ❌ Failed to load state_dict from {model_path}: {e}")
-        raise e
+    return torch.load(model_path, map_location=device)
 
 def create_pruned_model_architecture(state_dict):
-    """Creates a model with an architecture matching the pruned state dict."""
-    if not os.path.isdir(BASELINE_DIR):
-        print(f"   ❌ Baseline model directory not found at {BASELINE_DIR} for architecture creation.")
-        raise FileNotFoundError(f"Baseline directory not found: {BASELINE_DIR}")
-        
+    """
+    Create a model with architecture matching the pruned state dict
+    """
     model = DistilBertForSequenceClassification.from_pretrained(BASELINE_DIR)
     ffn_dims = {}
     for key in state_dict.keys():
         if 'ffn.lin1.weight' in key:
-            parts = key.split('.')
-            if len(parts) >= 4:
-                try:
-                    layer_num = int(parts[3])
-                    new_dim = state_dict[key].shape[0]
-                    ffn_dims[layer_num] = new_dim
-                except (ValueError, IndexError):
-                    continue
-    
+            try:
+                layer_num = int(key.split('.')[3])
+                new_dim = state_dict[key].shape[0]
+                ffn_dims[layer_num] = new_dim
+            except (ValueError, IndexError):
+                continue
     for layer_num, new_dim in ffn_dims.items():
         if layer_num < len(model.distilbert.transformer.layer):
             layer_module = model.distilbert.transformer.layer[layer_num]
@@ -62,29 +47,51 @@ def create_pruned_model_architecture(state_dict):
 
 class GatingNetwork(nn.Module):
     """
-    A simple MLP that takes text embeddings and the current energy state to
-    predict the most suitable expert.
+    Enhanced Gating Network where Energy is a first-class citizen.
+    It projects the scalar energy value into a high-dimensional vector space
+    before combining it with text embeddings.
     """
     def __init__(self, embedding_dim: int, num_experts: int, hidden_dim: int = 128):
         super().__init__()
-        self.layer_stack = nn.Sequential(
-            nn.Linear(embedding_dim + 1, hidden_dim),
+        
+        # Project text embeddings (768 -> hidden_dim)
+        self.text_projector = nn.Sequential(
+            nn.Linear(embedding_dim, hidden_dim),
+            nn.ReLU()
+        )
+        
+        # Project scalar energy (1 -> hidden_dim)
+        # This gives the model a rich representation of "Energy State"
+        self.energy_projector = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.Tanh(), # Tanh normalizes the continuous energy signal
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU()
+        )
+
+        # Combine and decide
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim), # Concatenating both vectors
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(hidden_dim, num_experts)
         )
 
     def forward(self, text_embedding: torch.Tensor, energy_level: torch.Tensor) -> torch.Tensor:
-        combined_input = torch.cat([text_embedding, energy_level], dim=1)
-        logits = self.layer_stack(combined_input)
+        # text_embedding: [Batch, 768]
+        # energy_level:   [Batch, 1]
+        
+        text_vec = self.text_projector(text_embedding)
+        energy_vec = self.energy_projector(energy_level)
+        
+        # Combine distinct representations
+        combined_input = torch.cat([text_vec, energy_vec], dim=1)
+        logits = self.classifier(combined_input)
         return logits
 
-# --- Main MoE System with Trainable Gate ---
+# --- Main MoE System ---
 
 class TrainableEnergyAwareMoE:
-    """
-    Implements an MoE system with a trainable, data-driven gating network.
-    """
     def __init__(self, max_energy_capacity=100.0, initial_energy=20.0):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.experts = {}
@@ -92,16 +99,21 @@ class TrainableEnergyAwareMoE:
         self.labels = ['NEGATIVE', 'POSITIVE']
         
         self.expert_names = ['baseline', 'quantized_baseline', 'pruned', 'pruned_quantized']
+        # Costs for the custom loss function
         self.expert_energy_costs = {
             'baseline': 15.0, 'quantized_baseline': 10.0,
             'pruned': 8.0, 'pruned_quantized': 5.0,
         }
+        # Pre-compute cost tensor for faster loss calculation
+        self.expert_costs_tensor = torch.tensor(
+            [self.expert_energy_costs[name] for name in self.expert_names], 
+            device=self.device
+        )
         
         self.max_energy_capacity = max_energy_capacity
         self.current_energy = min(initial_energy, max_energy_capacity)
 
-        print("🚀 Initializing Trainable Energy-Aware MoE...")
-        print(f"   - Device:           {self.device}")
+        print(f"🚀 Initializing MoE on {self.device}...")
         self._load_experts()
 
         self.gating_network = GatingNetwork(
@@ -113,152 +125,99 @@ class TrainableEnergyAwareMoE:
         if 'baseline' in self.experts:
             self.text_embedder = self.experts['baseline'].distilbert.embeddings.to(self.device)
             self.text_embedder.eval()
-        else:
-            print("⚠️ Baseline expert not found. Gate cannot extract text features.")
-            self.text_embedder = None
 
     def _load_experts(self):
-        """
-        Loads all expert models into memory.
-        
-        FOR DEMONSTRATION: This function will now create distinct copies of a base
-        model and slightly alter their weights to simulate performance differences
-        between experts. This is crucial for generating meaningful training data for the gate.
-        """
-        print("\n1. Loading and creating distinct expert models for demonstration...")
-        
-        if not os.path.isdir(BASELINE_DIR):
-            print("   Baseline directory not found. Using 'distilbert-base-uncased' for all experts.")
-            base_model_name = 'distilbert-base-uncased'
-            self.tokenizer = DistilBertTokenizerFast.from_pretrained(base_model_name)
-        else:
-            base_model_name = BASELINE_DIR
-            self.tokenizer = DistilBertTokenizerFast.from_pretrained(base_model_name)
+        print("   - Loading experts from saved checkpoints...")
+        model_name = BASELINE_DIR if os.path.isdir(BASELINE_DIR) else 'distilbert-base-uncased'
+        self.tokenizer = DistilBertTokenizerFast.from_pretrained(model_name)
 
-        # --- Load the 'baseline' expert ---
-        print("   - Loading 'baseline' expert...")
+        # Baseline
+        self.experts['baseline'] = DistilBertForSequenceClassification.from_pretrained(model_name).to(self.device)
+
+        # Pruned
         try:
-            baseline_model = DistilBertForSequenceClassification.from_pretrained(base_model_name).to(self.device)
-            self.experts['baseline'] = baseline_model
+            pruned_sd = load_state_dict_safely(PRUNED_MODEL_PATH, self.device)
+            pruned_model = create_pruned_model_architecture(pruned_sd)
+            pruned_model.load_state_dict(pruned_sd)
+            self.experts['pruned'] = pruned_model.to(self.device)
         except Exception as e:
-            print(f"   ⚠️ Could not load baseline expert: {e}")
-            return # Cannot proceed without a baseline model
+            print(f"   ⚠️ Could not load pruned expert: {e}")
 
-        # --- Create simulated experts with performance differences ---
-        # We will deepcopy the baseline and add noise to simulate pruning/quantization
-        experts_to_simulate = {
-            'quantized_baseline': 0.005, # amount of noise to add
-            'pruned': 0.01,
-            'pruned_quantized': 0.02
-        }
+        # Quantized baseline
+        try:
+            q_base_model = DistilBertForSequenceClassification.from_pretrained(model_name)
+            quantize_(q_base_model, Int8WeightOnlyConfig())
+            q_base_sd = load_state_dict_safely(QUANTIZED_BASELINE_PATH, self.device)
+            q_base_model.load_state_dict(q_base_sd)
+            self.experts['quantized_baseline'] = q_base_model.to(self.device)
+        except Exception as e:
+            print(f"   ⚠️ Could not load quantized baseline expert: {e}")
 
-        for name, noise_level in experts_to_simulate.items():
-            print(f"   - Simulating '{name}' expert...")
-            # 1. Create a true, independent copy of the model
-            simulated_model = copy.deepcopy(baseline_model)
-            
-            # 2. Add random noise to its weights to simulate performance degradation
-            with torch.no_grad():
-                for param in simulated_model.parameters():
-                    param.add_(torch.randn(param.size()).to(self.device) * noise_level)
-            
-            self.experts[name] = simulated_model
+        # Pruned + quantized
+        try:
+            q_pruned_sd_cpu = load_state_dict_safely(QUANTIZED_PRUNED_PATH, 'cpu')
+            q_pruned_model = create_pruned_model_architecture(q_pruned_sd_cpu)
+            quantize_(q_pruned_model, Int8WeightOnlyConfig())
+            q_pruned_model.load_state_dict(q_pruned_sd_cpu)
+            self.experts['pruned_quantized'] = q_pruned_model.to(self.device)
+        except Exception as e:
+            print(f"   ⚠️ Could not load pruned + quantized expert: {e}")
 
-        for expert in self.experts.values():
-            expert.eval()
-            
-        print(f"\n✅ {len(self.experts)} distinct expert models are ready.")
+        for model in self.experts.values():
+            model.eval()
 
     def _get_text_embedding(self, inputs: dict) -> torch.Tensor:
-        """Extracts the [CLS] token embedding for the input text."""
-        if self.text_embedder is None:
-            raise RuntimeError("Text embedder is not available. Cannot generate features for the gate.")
         with torch.no_grad():
-            embeddings = self.text_embedder(inputs['input_ids'])
-            return embeddings[:, 0, :]
+            return self.text_embedder(inputs['input_ids'])[:, 0, :]
 
     def predict(self, text: str, harvested_energy: float = 0.0):
-        """Performs a full MoE inference cycle using the trainable gate."""
         self.current_energy = min(self.current_energy + harvested_energy, self.max_energy_capacity)
         
-        # --- FIX: Add truncation=True and max_length=512 ---
-        inputs = self.tokenizer(
-            text, 
-            return_tensors="pt", 
-            truncation=True, 
-            max_length=512
-        ).to(self.device)
-        # ---------------------------------------------------
-
-        text_embedding = self._get_text_embedding(inputs)
+        inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=512).to(self.device)
+        text_emb = self._get_text_embedding(inputs)
         energy_tensor = torch.tensor([[self.current_energy]], dtype=torch.float32, device=self.device)
         
+        # 1. Gate Decision
         with torch.no_grad():
-            gate_logits = self.gating_network(text_embedding, energy_tensor)
-        
-        for i, expert_name in enumerate(self.expert_names):
-            if self.expert_energy_costs.get(expert_name, float('inf')) > self.current_energy:
-                gate_logits[0, i] = -torch.inf
+            gate_logits = self.gating_network(text_emb, energy_tensor)
+            
+            # Mask out unaffordable experts during inference (Hard constraint)
+            for i, name in enumerate(self.expert_names):
+                if self.expert_energy_costs[name] > self.current_energy:
+                    gate_logits[0, i] = -float('inf')
 
-        if torch.all(gate_logits == -torch.inf):
-            chosen_expert_name = "None"
-        else:
-            chosen_expert_idx = torch.argmax(gate_logits, dim=1).item()
-            chosen_expert_name = self.expert_names[chosen_expert_idx]
-        
-        if chosen_expert_name == "None":
-            return {"prediction": "SKIPPED", "score": 0.0, "expert_used": "None", "latency_sec": 0.0, "energy_before": self.current_energy, "energy_after": self.current_energy, "energy_cost": 0.0, "status": "Insufficient energy"}
+            if torch.all(gate_logits == -float('inf')):
+                return {
+                    "prediction": "SKIPPED", "score": 0.0, 
+                    "expert_used": "None", "latency_sec": 0.0, 
+                    "energy_before": self.current_energy, "energy_after": self.current_energy, 
+                    "energy_cost": 0.0, "status": "Insufficient energy"
+                }
 
-        expert_model = self.experts[chosen_expert_name]
-        energy_cost = self.expert_energy_costs[chosen_expert_name]
-        energy_before_inference = self.current_energy
+            expert_idx = torch.argmax(gate_logits, dim=1).item()
+            expert_name = self.expert_names[expert_idx]
+
+        # 2. Expert Execution
+        expert = self.experts[expert_name]
+        cost = self.expert_energy_costs[expert_name]
+        energy_before = self.current_energy
         
+        start = time.perf_counter()
         with torch.no_grad():
-            start_time = time.perf_counter()
-            outputs = expert_model(**inputs)
-            latency = time.perf_counter() - start_time
+            outputs = expert(**inputs)
+        latency = time.perf_counter() - start
         
-        self.current_energy -= energy_cost
+        self.current_energy -= cost
+        probs = torch.softmax(outputs.logits, dim=1)
+        pred_idx = torch.argmax(probs, dim=1).item()
         
-        logits = outputs.logits
-        scores = torch.softmax(logits, dim=1)
-        prediction_idx = torch.argmax(scores, dim=1).item()
-        
-        return {"prediction": self.labels[prediction_idx], "score": scores[0][prediction_idx].item(), "expert_used": chosen_expert_name, "latency_sec": latency, "energy_before": energy_before_inference, "energy_after": self.current_energy, "energy_cost": energy_cost, "status": "Success"}
-
-# --- Example Usage ---
-if __name__ == "__main__":
-    
-    print("--- Setting up dummy model files for demonstration ---")
-    if not os.path.isdir(BASELINE_DIR):
-        print(f"Creating dummy directory: {BASELINE_DIR}")
-        os.makedirs(BASELINE_DIR, exist_ok=True)
-        dummy_model = DistilBertForSequenceClassification.from_pretrained('distilbert-base-uncased')
-        dummy_model.save_pretrained(BASELINE_DIR)
-        DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased').save_pretrained(BASELINE_DIR)
-
-        os.makedirs(os.path.dirname(PRUNED_MODEL_PATH), exist_ok=True)
-        torch.save(dummy_model.state_dict(), PRUNED_MODEL_PATH)
-        os.makedirs(os.path.dirname(QUANTIZED_BASELINE_PATH), exist_ok=True)
-        torch.save(dummy_model.state_dict(), QUANTIZED_BASELINE_PATH)
-        os.makedirs(os.path.dirname(QUANTIZED_PRUNED_PATH), exist_ok=True)
-        torch.save(dummy_model.state_dict(), QUANTIZED_PRUNED_PATH)
-    print("----------------------------------------------------\n")
-
-    moe_system = TrainableEnergyAwareMoE(max_energy_capacity=50.0, initial_energy=16.0)
-    
-    sentence = "This movie is a masterpiece, a true work of art."
-    
-    print("\n" + "="*80)
-    print("🚀 Starting Inference Simulation with an UNTRAINED Gating Network")
-    print("="*80)
-    
-    # Note: Since the gate is untrained, its choices will be random/arbitrary.
-    # The purpose here is to verify that the system runs end-to-end.
-    result = moe_system.predict(sentence, harvested_energy=0.0)
-    
-    print(f"    🔋 Energy State: {result['energy_before']:.1f} -> {result['energy_after']:.1f} (Cost: {result['energy_cost']:.1f})")
-    print(f"    🤖 Expert Used:  {result['expert_used']} ({result['status']})")
-    if result['status'] == 'Success':
-        print(f"    📝 Prediction:   {result['prediction']} (Score: {result['score']:.4f})")
-        print(f"    ⏱️ Latency:      {result['latency_sec']*1000:.2f} ms")
+        return {
+            "prediction": self.labels[pred_idx],
+            "score": probs[0][pred_idx].item(),
+            "expert_used": expert_name,
+            "latency_sec": latency,
+            "energy_before": energy_before,
+            "energy_after": self.current_energy,
+            "energy_cost": cost,
+            "status": "Success"
+        }
